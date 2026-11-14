@@ -186,7 +186,7 @@ export default struct ImageManagementContent {
     const rootfsPath = this.emulator.rootFilesystem
     const context = this.getUIContext().getHostContext()?.getApplicationContext()
     const filesDir = context?.filesDir || ''
-    const bundleName = context?.applicationInfo?.name || 'dev.hackeris.hish'
+    const bundleName = context?.applicationInfo?.name || 'dev.snoworwind.hish'
     const fullPath = rootfsPath.startsWith('/') ? rootfsPath : `${filesDir}/${rootfsPath}`
     
     try {

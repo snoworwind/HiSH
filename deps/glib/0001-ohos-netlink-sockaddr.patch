@@ -1,0 +1,28 @@
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+OpenHarmony's clang sysroot has two conflicting definitions of
+struct sockaddr_storage: sys/socket.h declares it (unless __MUSL__ is
+set, which the OHOS target does not define) and the bionic-derived
+linux/socket.h declares it unconditionally.  gnetworkmonitornetlink.c
+includes both, so the translation unit fails to compile for the OHOS
+target.
+
+Skip linux/socket.h for that translation unit and provide the
+__kernel_sa_family_t typedef it would have supplied.  linux/netlink.h
+and linux/rtnetlink.h only need that typedef from linux/socket.h.
+
+--- a/gio/gnetworkmonitornetlink.c
++++ b/gio/gnetworkmonitornetlink.c
+@@ -38,6 +38,12 @@
+ 
+ /* must come at the end to pick system includes from
+  * gnetworkingprivate.h */
++#ifdef __OHOS__
++/* the OHOS sysroot's linux/socket.h redefines struct sockaddr_storage that
++ * sys/socket.h has already declared; skip it and keep the typedef below. */
++#define _UAPI_LINUX_SOCKET_H 1
++typedef unsigned short __kernel_sa_family_t;
++#endif
+ #include <linux/netlink.h>
+ #include <linux/rtnetlink.h>
+ 

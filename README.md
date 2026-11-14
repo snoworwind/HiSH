@@ -21,7 +21,7 @@
 - Alpine Linux根文件系统
 - 虚拟按键（Tab/Ctrl/Esc/Shift/Fn/方向键）
 - 共享文件夹
-- JIT（Pad/2in1设备支持，Phone设备不支持）
+- JIT（开发版通过调试 Profile 的 ACL 权限启用；商店版受应用市场政策限制使用 TCI）
 - 镜像导入（[Ubuntu24.04镜像](https://github.com/harmoninux/linux-config/releases/download/rootfs-20251213/ubuntu-base-24.04.zip) / [Debian12镜像](https://github.com/harmoninux/linux-config/releases/download/release-20251129-debian/debian12.zip)）
 
 ## 使用指南
@@ -40,131 +40,107 @@ QQ群二维码
 
 # 构建指南
 
+**默认从源码构建**：QEMU 及其依赖、Linux 内核都由 `scripts/` 从固定源码构建，根文件系统由脚本组装（其中 Alpine 官方仓库的软件包直接使用）；下载的预编译产物只作为快速回退。完整规则、版本要求和每次变更的强制检查见 [源码构建策略](docs/build-from-source.md)。
+
 - HAP包
-- libqemu-system库（可选）
-- Linux内核（可选）
-- 根文件系统（可选）
+- libqemu-system库
+- Linux内核（6.12 最新 LTS）
+- 根文件系统（自建）
 
 ## 构建HAP
 
 * 下载安装 [DevEco Studio](https://developer.huawei.com/consumer/cn/deveco-studio/)
-* 克隆代码到本地
-* 仓库里执行 `git submodule update --init --recursive` 拉取子模块代码
+* 克隆代码到本地，并执行 `git submodule update --init --recursive` 拉取子模块代码
 * 复制`build-profile.template.json5`到`build-profile.json5`
-* 下载以下文件到指定位置：
-  - [libs.zip](https://github.com/harmoninux/qemu/releases/download/hish-20260110/libs.zip)（解压到`feature/hish_main/libs`）
-  - [feature/hish_main/src/main/resources/rawfile/vm/kernel_aarch64](https://github.com/harmoninux/linux-config/releases/download/kernel-20260228/kernel_aarch64)
-  - [feature/hish_main/src/main/resources/rawfile/vm/rootfs_aarch64.qcow2](https://github.com/harmoninux/linux-config/releases/download/rootfs-20260117/rootfs_aarch64.qcow2)
-* 在DevEco Studio中构建项目（默认构建`product/tablet`，如需同时构建Phone版，取消`build-profile.json5`中phone模块的注释）
+* 按默认策略生成依赖：
+  * `libqemu-system` 库：参考 [构建libqemu-system](#构建libqemu-system)
+  * 内核：参考 [构建Linux内核](#构建linux内核)
+  * 根文件系统：参考 [构建Linux根文件系统](#构建linux根文件系统)
+* 在DevEco Studio中构建项目（`build-profile.json5` 中同时包含 `product/tablet` 和 `product/phone`，构建时选择需要的 product）
 * 签名后在设备或模拟器上运行。参考 [本地真机运行应用](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/ide-run-device) | [自动签名-未关联注册应用](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/ide-signing#section151231211105010)
 
-## 构建libqemu-system（可选）
+如果只是临时验证、不走源码构建，可以从下面地址下载预编译产物；**使用后必须在 `docs/` 中登记来源、版本和 SHA-256，并注明未从源码构建**：
 
-在Ubuntu或Windows的WSL2环境下构建自定义的`libqemu-system-aarch64.so`：
+- [libs.zip](https://github.com/harmoninux/qemu/releases/download/hish-20260110/libs.zip)（解压到`feature/hish_main/libs`）
+- [kernel_aarch64](https://github.com/harmoninux/linux-config/releases/download/kernel-20260228/kernel_aarch64)
+- [rootfs_aarch64.qcow2](https://github.com/harmoninux/linux-config/releases/download/rootfs-20260117/rootfs_aarch64.qcow2)
+
+## 构建libqemu-system
+
+在Ubuntu或Windows的WSL2环境下构建自定义的`libqemu-system-aarch64.so`，产物放到 `feature/hish_main/libs/<abi>/`。
 
 * 安装依赖：
 
-```shell 
+```shell
 sudo apt install -y build-essential cmake curl wget unzip python3 libncurses-dev \
     git flex bison bash make autoconf libcurl4-openssl-dev tcl \
-    gettext zip pigz meson 
+    gettext zip pigz meson
 ```
 
-* 从[华为开发者官网](https://developer.huawei.com/consumer/cn/download/)下载Linux版"Command Line Tools"
+* 从[华为开发者官网](https://developer.huawei.com/consumer/cn/download/)下载Linux版"Command Line Tools"（国内网络也可使用公开的 OpenHarmony Release SDK，差异见 [源码构建策略](docs/build-from-source.md)）
 * 解压后将`TOOL_HOME`环境变量设置为解压目录
 * 进入`deps`目录运行`make`（默认针对x86_64模拟器）：
     * 针对真机的构建（arm64-v8a），需要执行`make aarch64`
     * 针对不支持JIT的Phone设备，可执行`make aarch64-tci`，使用QEMU TCG解释器（TCI）构建，并生成`libqemu-system-aarch64-tci.so`。TCI性能低于JIT，但不依赖JIT支持。
-```shell 
-cd deps 
+```shell
+cd deps
 make
 ```
 * 构建产物位于`deps/output`目录
 
-## 构建Linux内核（可选）
+本仓库另外提供了一条已验证的 WSL 流水线：`scripts/build-source-linux.sh`，它从固定版本的源码构建 GLib、Pixman、zlib、zstd、PCRE2、libffi、libslirp 和 QEMU，并记录每次构建的哈希；真机的 `arm64-v8a` 用默认参数，模拟器的 `x86_64` 加 `TARGET_ARCH=x86_64`。说明见 [docs/source-build-2026-11-14.md](docs/source-build-2026-11-14.md)。
 
-* 安装依赖：
+## 构建Linux内核
 
-```shell 
-sudo apt install build-essential gcc bc bison flex libssl-dev \
- libncurses5-dev libelf-dev gcc-aarch64-linux-gnu \
- clang lld llvm make 
-```
-
-* 克隆Linux内核源码：
-
-```shell 
-git clone --depth=1 -b v6.12 https://github.com/torvalds/linux 
-```
-
-* 下载内核配置：
-
-```shell 
-cd linux 
-curl https://raw.githubusercontent.com/harmoninux/linux-config/refs/heads/master/arm64_virt > .config 
-```
-
-* 编译内核：
+默认使用 kernel.org 上 **6.12 系列最新的长期支持版本**（当前 6.12.117）从源码构建。脚本会下载源码、对照 kernel.org 的 `sha256sums.asc` 校验 SHA-256，本地已导入内核签名公钥时还会校验该文件的 PGP 签名，然后用项目的 `arm64_virt` 配置生成 `Image`：
 
 ```shell
-export KCFLAGS='-march=armv8.5-a+crc+crypto+lse+rcpc+rng+sm4+sha3+dotprod+fp16 -mtune=neoverse-n1 -O2 -falign-functions=64 -fno-strict-aliasing -mllvm -vectorize-loops -mllvm -force-vector-width=2'
-env KCFLAGS="$KCFLAGS" make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 menuconfig
-env KCFLAGS="$KCFLAGS" make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 -j$(nproc)
+# 一次性导入校验和签名公钥（可选，但推荐）
+gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys 632D3A06589DA6B1
+
+# 在 WSL/Linux 中执行；不指定 KERNEL_VERSION 时使用脚本内的当前默认版本
+KERNEL_VERSION=6.12.117 scripts/build-source-kernel.sh
 ```
 
-* 内核镜像位于`arch/arm64/boot/Image`，复制到项目对应目录
+产物位于 `.temp/source-build/images/kernel_aarch64`，复制到 `feature/hish_main/src/main/resources/rawfile/vm/kernel_aarch64`。升级版本时同时更新 `docs/` 里记录的版本、SHA-256 和 PGP 校验结果。
 
-## 构建Linux根文件系统（可选）
+也可以手工构建（需要 `aarch64-linux-gnu-gcc`、`bc`、`bison`、`flex`、`libssl-dev`、`libelf-dev`）：
 
-以下是构建自定义根文件系统的完整流程
-
-* 准备Alpine根文件系统
-
-```shell 
-# 创建目录并解压Alpine最小根文件系统 
-mkdir alpine 
-wget https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/alpine-minirootfs-3.22.1-aarch64.tar.gz 
-tar xvf alpine-minirootfs-3.22.1-aarch64.tar.gz -C alpine 
+```shell
+git clone --depth=1 -b v6.12 https://github.com/torvalds/linux
+cd linux
+curl https://raw.githubusercontent.com/harmoninux/linux-config/refs/heads/master/arm64_virt > .config
+make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image
 ```
 
-* 创建磁盘镜像文件
+手工构建只用于调试配置；提交的镜像应当来自上面的脚本，便于复现和记录。
 
-```shell 
-# 创建8GB大小的原始镜像文件（可根据需要调整大小）
-qemu-img create -f raw rootfs.img 8G 
- 
-# 格式化为ext4文件系统 
-mkfs.ext4 rootfs.img 
+## 构建Linux根文件系统
+
+默认用脚本从 Alpine 最新稳定分支（当前 3.24.4）的 minirootfs 加 `apk` 包组装，写入 HiSH 的自动登录、串口控制台、9p 共享目录、DHCP 和 guest agent 配置，再生成 ext4 和 qcow2：
+
+```shell
+# 在 WSL/Linux 中执行；LAB 目录必须位于支持稀疏文件的文件系统上
+scripts/build-source-rootfs.sh
 ```
 
-* 挂载并填充文件系统
+产物位于 `.temp/source-build/images/rootfs_aarch64.qcow2`，复制到 `feature/hish_main/src/main/resources/rawfile/vm/rootfs_aarch64.qcow2`。脚本同时输出包清单 `rootfs_aarch64.qcow2.packages.txt`（发行版、软件源、34 个包及版本），该清单会写入 `manifest.json`。可调参数（`ALPINE_VER`、`SIZE`、`EXTRA_PACKAGES`、`OUT` 等）写在脚本头部。
 
-```shell 
-# 创建挂载点并挂载镜像 
-sudo mkdir -p /mnt/rootfs 
-sudo mount -o loop rootfs.img /mnt/rootfs 
- 
-# 复制Alpine文件系统内容 
-sudo cp -a alpine/* /mnt/rootfs/
- 
-# 卸载镜像 
-sudo umount /mnt/rootfs 
+镜像里的软件包来自 Alpine 官方 `main`/`community` 仓库，由 `apk` 验签安装；按 [源码构建策略](docs/build-from-source.md)，这些官方包直接使用，不要求从源码重建。
+
+需要手工调整镜像内容时，可以解包或挂载脚本生成的镜像修改，但发布用的镜像必须能由脚本重新生成；手工修改只用于试验。
+
+## 校验构建产物
+
+提交镜像或库之前，至少跑完下面两项：
+
+```shell
+python scripts/verify-source-build.py     # ELF 架构、Image/qcow2 头、QEMU 入口符号，并比对镜像与 manifest 记录
+scripts/smoke-vm-images.sh                # 启动新内核与 rootfs，9 项运行检查
 ```
 
-* 转换为qcow2格式
-
-```shell 
-# 转换格式（qcow2支持动态分配空间）
-qemu-img convert -p -f raw -O qcow2 rootfs.img rootfs.qcow2 
-```
-
-* 部署到项目
-
-```shell 
-# 将生成的文件放入项目目录 
-mkdir -p feature/hish_main/src/main/resources/rawfile/vm/
-mv rootfs.qcow2 feature/hish_main/src/main/resources/rawfile/vm/rootfs_aarch64.qcow2 
-```
+随后用 `powershell -File scripts/record-source-build.ps1` 更新 `.temp/source-build/manifest.json` 的产物哈希，并在 `docs/` 新增本次构建记录。
 
 # Star history
 

@@ -6,17 +6,53 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 HiSH is a HarmonyOS application that runs a Linux Shell using QEMU. It's based on qemu-ohos and supports 2in1 (PC), tablet, and phone devices. The app provides a complete arm64 Linux kernel with network support, Alpine Linux root filesystem, virtual keys, shared folders, and VNC support.
 
+The repository uses a single shared implementation module (`feature/hish_main`) with thin product modules under `product/phone` and `product/tablet`. The application bundle name is `dev.snoworwind.hish` (`AppScope/app.json5`).
+
+## Source Build Policy (default)
+
+Every component that ships in the HAP or in the guest image must be built from pinned sources, except the Huawei SDK, toolchain, NDK, and packages from the official Alpine `main`/`community` repositories (used as-is, no source rebuild required). Prebuilt downloads (`libs.zip`, `kernel_aarch64`, `rootfs_aarch64.qcow2`) are fallbacks only and must be documented with source URL, version and SHA-256. The full rules are in [docs/build-from-source.md](docs/build-from-source.md).
+
+| Component | Default command | Output |
+| --- | --- | --- |
+| QEMU + native deps | `OHOS_SDK_HOME=/path/to/ohos-sdk/linux scripts/build-source-linux.sh all` (`TARGET_ARCH=x86_64` for the emulator ABI) | `.temp/source-build/linux/qemu-build/*.so` and `.temp/source-build/linux-x86_64/qemu-build/*.so`, copied to `feature/hish_main/libs/<abi>/` |
+| Windows-toolchain deps | `scripts/build-source-deps.ps1`, `scripts/build-source-meson.ps1 -Only pixman\|glib` | `.temp/source-build/install/` |
+| Linux kernel | `KERNEL_VERSION=<latest 6.12 LTS> scripts/build-source-kernel.sh` | `.temp/source-build/images/kernel_aarch64`, copied to `feature/hish_main/src/main/resources/rawfile/vm/kernel_aarch64` |
+| rootfs | `scripts/build-source-rootfs.sh` | `.temp/source-build/images/rootfs_aarch64.qcow2`, copied to `feature/hish_main/src/main/resources/rawfile/vm/rootfs_aarch64.qcow2` |
+| Format checks | `python scripts/verify-source-build.py` | exit status |
+| Boot checks | `scripts/smoke-vm-images.sh` | 9 runtime checks, log in `.temp/source-build/logs/vm-smoke.log` |
+| Provenance record | `powershell -File scripts/record-source-build.ps1` | `.temp/source-build/manifest.json` |
+
+Version rules: kernel = latest 6.12 longterm on kernel.org (currently 6.12.117); rootfs = latest Alpine stable branch (currently 3.24.4), whose official `main`/`community` packages are used as-is (no source rebuild required) and recorded in `docs/rootfs-packages-*.txt` plus the manifest; QEMU = `harmoninux/qemu` branch `hish-libqemu` pinned to `50ce7096`; QEMU deps pinned per `manifest.json`. Bumping the kernel or rootfs requires `scripts/smoke-vm-images.sh` to pass before committing the images. Build details and the reasons behind the portability patches: [docs/source-build-2026-11-14.md](docs/source-build-2026-11-14.md) and [docs/vm-images-2026-11-14.md](docs/vm-images-2026-11-14.md).
+
 ## Build Commands
 
 ### Build HAP (HarmonyOS Application Package)
+
 Use DevEco Studio to build the project:
 - Install DevEco Studio from https://developer.huawei.com/consumer/cn/deveco-studio/
-- Clone the repo and copy `build-profile.template.json5` to `build-profile.json5`
-- Download required resources (libs.zip, kernel_aarch64, rootfs_aarch64.qcow2) to `entry/src/main/resources/rawfile/vm/`
+- Clone the repo and run `git submodule update --init --recursive`
+- Copy `build-profile.template.json5` to `build-profile.json5`
+- Produce the dependencies with the source builds above (`feature/hish_main/libs/<abi>/` and `feature/hish_main/src/main/resources/rawfile/vm/`)
 - Build in DevEco Studio and sign for installation
 
+`build-profile.json5` contains both `product/tablet` and `product/phone`; pick the product you need in DevEco Studio.
+
+Signing: DevEco automatic signing writes a `signingConfigs` block into `build-profile.json5` (gitignored, passwords encrypted by the IDE) pointing at `~/.ohos/config/default_HiSH_*`; builds then emit `*-signed.hap`. Verify a package with `java -jar <sdk>/toolchains/lib/hap-sign-tool.jar verify-app -inFile <hap> -outCertChain <cer> -outProfile <p7b>`.
+
+CLI equivalent (signed automatically when `signingConfigs` is present):
+
+```powershell
+$env:DEVECO_SDK_HOME='D:/D Program Files/DevEco Studio/sdk'
+$env:NODE_HOME='D:/D Program Files/DevEco Studio/tools/node'
+$env:JAVA_HOME='D:/D Program Files/DevEco Studio/jbr'
+& 'D:/D Program Files/DevEco Studio/tools/node/node.exe' `
+  'D:/D Program Files/DevEco Studio/tools/hvigor/bin/hvigorw.js' `
+  --mode module -p product=default -p module=phone@default -p buildMode=debug assembleHap --no-daemon
+```
+
 ### Build libqemu-system (Native QEMU Library)
-Builds QEMU and its dependencies. Requires Ubuntu or Windows WSL2:
+
+The project's own build uses the HarmonyOS Linux Command Line Tools (Ubuntu or Windows WSL2):
 
 ```bash
 # Install dependencies
@@ -27,40 +63,38 @@ sudo apt install -y build-essential cmake curl wget unzip python3 libncurses-dev
 # Download HarmonyOS Command Line Tools and set TOOL_HOME
 export TOOL_HOME=/path/to/commandline/tools
 
-# Build for x86_64 emulator (default)
 cd deps
-make
-
-# Build for arm64-v8a device
-make aarch64
-
-# Clean build
+make            # x86_64 emulator
+make aarch64    # arm64-v8a device
+make aarch64-tci  # TCI build for devices without JIT
 make clean
 ```
 
-Build outputs are placed in `deps/output/` and copied to `entry/libs/<abi>/` automatically.
+Build outputs are placed in `deps/output/` and copied to `feature/hish_main/libs/<abi>/` automatically. The alternative, hash-recording pipeline is `scripts/build-source-linux.sh` (see the policy section).
 
 ### Linting
+
 The project uses `.clang-format` for C++ code formatting. Apply with:
 ```bash
-clang-format -i entry/src/main/cpp/**/*.cpp
+clang-format -i feature/hish_main/src/main/cpp/**/*.cpp
 ```
 
 ## Architecture
 
 ### Application Entry Points
-- `entry/src/main/ets/entryability/EntryAbility.ets` - Main ability that:
+- `feature/hish_main/src/main/ets/entryability/EntryAbility.ets` - Shared ability that:
   - Loads user preferences
-  - Extracts kernel and root filesystem on first run
+  - Extracts kernel, rootfs, BIOS ROM and keymaps from rawfile on first run, when `versionCode` changes, or for `dev.*` bundles
   - Prepares shared folders
   - Starts the default emulator VM
   - Handles background running state
+- `product/phone/src/main/ets/entryability/EntryAbility.ets`, `product/tablet/...` - Product entry points re-exporting the shared ability
 
 ### UI Structure
-- `entry/src/main/ets/pages/Index.ets` - Main page, renders different layouts based on device type:
+- `feature/hish_main/src/main/ets/pages/Index.ets` - Main page, renders different layouts based on device type:
   - `PcIndex` - Full desktop layout with toolbar, terminal, and management dialogs
   - `PhoneOrTablet` - Mobile layout with terminal and optional status bar
-- `entry/src/main/ets/components/` - Reusable UI components:
+- `feature/hish_main/src/main/ets/components/` - Reusable UI components:
   - `WebTerminal.ets` - xterm.js-based terminal interface with virtual keys
   - `VmStatusBar.ets` - VM resource monitoring display
   - `EmulatorListGrid.ets`, `EditEmulatorContent.ets` - Emulator management
@@ -68,29 +102,29 @@ clang-format -i entry/src/main/cpp/**/*.cpp
   - `SharedFolderContent.ets` - Shared folder file browser
   - `SettingsContent.ets` - Application settings
 
-### Data Models (`entry/src/main/ets/model/`)
+### Data Models (`feature/hish_main/src/main/ets/model/`)
 - `Emulator.ets` - Core data structures:
   - `Emulator` - VM configuration (CPU, memory, port mapping, init path, etc.)
   - `PortMapping` - Network port forwarding rules
   - `RootFilesystem` - Available root filesystem images
-  - `defaultEmulator`, `defaultRoot` - Default configurations
+  - `defaultEmulator`, `defaultRootfs` - Default configurations
 - `appOption.ets` - Application-wide settings and preferences keys
 
-### VM Management (`entry/src/main/ets/lib/`)
+### VM Management (`feature/hish_main/src/main/ets/lib/`)
 - `startVm.ets` - Builds QEMU command line arguments and starts the VM:
-  - Constructs QEMU args for machine, CPU, memory, kernel, network, drives, etc.
-  - Configures VNC server when enabled
-  - Calls native `napi.startVM()` via libentry.so
+  - Constructs QEMU args for machine, CPU, memory, kernel, network, drives, 9p shares, QMP/QGA sockets and VNC
+  - Picks JIT vs TCI by bundle name: the marketplace bundles (`app.hackeris.hish`, `app.snoworwind.hish`) use `libqemu-system-aarch64-tci.so`, all other bundles (including `dev.snoworwind.hish`) use the JIT library
+  - Calls native `napi.startVM()` via `libhish_main.so`
 - `QemuAgent.ets`, `QemuAgentManager.ets` - QMP (QEMU Monitor Protocol) communication for VM control
 - `terminalVirtualKeys.ets` - Virtual keyboard handling for mobile devices
 
-### Native Layer (`entry/src/main/cpp/`)
+### Native Layer (`feature/hish_main/src/main/cpp/`)
 - `napi_init.cpp` - N-API bindings between ArkTS and native code:
-  - `startVM()` - Starts QEMU with given arguments
+  - `startVM()` - `dlopen()`s `libqemu-system-aarch64.so` (or the TCI variant) and `libqemu-img.so`, resolves `qemu_system_entry` / `qemu_img_entry`, and runs the VM on its own thread
   - `checkPortUsed()` - Checks if a port is in use
-  - Interacts with libqemu-system-aarch64.so
+  - Serial output worker bridging the guest ttyAMA0 Unix socket to ArkTS callbacks
 
-### VNC Subsystem (`entry/src/main/cpp/`)
+### VNC Subsystem (`feature/hish_main/src/main/cpp/`)
 Three-thread architecture for VNC display rendering:
 
 - **`napi_vnc.cpp`** - N-API bindings and poll thread management:
@@ -117,10 +151,11 @@ Three-thread architecture for VNC display rendering:
 - **`utils.cpp`** / **`include/utils.hpp`** - HarmonyOS keycode to RFB keysym mapping
 
 ### Resources
-- `entry/src/main/resources/rawfile/vm/` - Kernel and root filesystem images
-- `entry/src/main/resources/rawfile/novnc/` - NoVNC web VNC client
-- `entry/src/main/resources/rawfile/term/` - xterm.js terminal emulator
-- `entry/src/main/resources/rawfile/guide/` - User guide documentation
+- `feature/hish_main/src/main/resources/rawfile/vm/` - Kernel (`kernel_aarch64`), root filesystem (`rootfs_aarch64.qcow2`), BIOS ROM and keymaps
+- `feature/hish_main/src/main/resources/rawfile/term/` - xterm.js terminal emulator (`term.html`, fonts, assets)
+- `feature/hish_main/src/main/resources/rawfile/guide/` - User guide documentation
+- `feature/hish_main/src/main/resources/rawfile/pages/` - Static pages such as `license.html`
+- `feature/hish_main/libs/<abi>/` - `libqemu-system-aarch64.so`, `libqemu-img.so`, `libslirp.so.0`
 
 ### Dependencies (`deps/`)
 Each dependency has its own Makefile. The main `deps/Makefile` orchestrates builds:
@@ -128,17 +163,21 @@ Each dependency has its own Makefile. The main `deps/Makefile` orchestrates buil
 - `pcre2`, `libglib` - QEMU dependencies
 - `pixman` - Graphics library
 - `libqemu/` - QEMU source and build configuration
+- `glib/` - Portability patches applied when building GLib for the OHOS target
 
 ## Key Technical Details
 
 - **Device Detection**: Uses `deviceInfo.deviceType` to render appropriate UI ('2in1', 'tablet', 'phone')
-- **Shared Folders**: Implemented via virtio-9p with 9p filesystem protocol
+- **Shared Folders**: Implemented via virtio-9p with 9p filesystem protocol (`hostshare`, plus `usershare` on 2in1)
 - **Network**: User-mode networking with configurable port forwarding
 - **VNC**: Optional VNC server with WebSocket support for GUI access
 - **Storage**: Uses `@ohos.data.preferences` for persistent settings
-- **Native Integration**: libentry.so provides QEMU runtime interface via N-API
+- **Native Integration**: libhish_main.so provides the QEMU runtime interface via N-API
+- **Guest images**: Kernel 6.12 LTS and an Alpine rootfs assembled by script; the guest auto-logs in as root on tty1 and ttyAMA0
 
 ## Native Build Requirements
-- HarmonyOS Command Line Tools (set `TOOL_HOME` environment variable)
+- HarmonyOS Command Line Tools (set `TOOL_HOME` environment variable) or the public OpenHarmony SDK for Linux
 - `OHOS_ARCH`: x86_64 (emulator) or aarch64 (device)
 - `OHOS_ABI`: x86_64 or arm64-v8a
+- Linux kernel builds: `aarch64-linux-gnu-gcc`, `bc`, `bison`, `flex`, `libssl-dev`, `libelf-dev`
+- rootfs builds: `e2fsprogs`, `qemu-utils`, `qemu-user-static`, `fakeroot`; work directory on a sparse-file-capable filesystem
