@@ -21,32 +21,39 @@ You can try one of following methods to get HiSH:
 - Alpine Linux rootfs
 - Virtual Keys (Tab/Ctrl/Esc/Up/Down/Left/Right)
 - Shared Folder
-- JIT (Supported on Pad/2in1, not supported on Phone)
+- JIT (enabled for dev builds through the debug profile ACL; the AppGallery build uses TCI because of store policy)
 - Image import（[Ubuntu24.04](https://github.com/harmoninux/linux-config/releases/download/rootfs-20251213/ubuntu-base-24.04.zip) / [Debian12](https://github.com/harmoninux/linux-config/releases/download/release-20251129-debian/debian12.zip)）
 
 # How to build
 
+**Source builds are the default.** QEMU, its dependencies and the Linux kernel are built by the scripts in `scripts/` from pinned sources; the root filesystem is assembled by script (packages from the official Alpine repositories are used as-is). Downloaded prebuilt artifacts are fallbacks only. The full policy, pinned versions and the checks required for every change are in [docs/build-from-source.md](docs/build-from-source.md).
+
 - HAP bundle
-- libqemu-system (optional)
-- Linux kernel (optional)
-- rootfs (optional)
+- libqemu-system
+- Linux kernel (latest 6.12 LTS)
+- rootfs (self-built)
 
 ## Build HAP
 
 - Download and install [DevEco Studio](https://developer.huawei.com/consumer/cn/deveco-studio/)
-- Clone this repo to local
- - Run `git submodule update --init --recursive` in HiSH directory
+- Clone this repo to local and run `git submodule update --init --recursive` in HiSH directory
 - Copy `build-profile.template.json5` to `build-profile.json5`
-- Download files and move to corresponding location as following (Notice: you should rename files as links)
-  - [feature/hish_main/libs.zip](https://github.com/harmoninux/qemu/releases/download/hish-20260110/libs.zip)(Extract to `feature/hish_main/libs`)
-  - [feature/hish_main/src/main/resources/rawfile/vm/kernel_aarch64](https://github.com/harmoninux/linux-config/releases/download/kernel-20260228/kernel_aarch64)
-  - [feature/hish_main/src/main/resources/rawfile/vm/rootfs_aarch64.qcow2](https://github.com/harmoninux/linux-config/releases/download/rootfs-20260117/rootfs_aarch64.qcow2)
+- Produce the dependencies with the default source builds:
+  - `libqemu-system`: see [Build libqemu-system](#build-libqemu-system)
+  - kernel: see [Build Linux kernel](#build-linux-kernel)
+  - rootfs: see [Build rootfs for Linux](#build-rootfs-for-linux)
 - Build project in DevEco Studio
 - Sign and run in your device or emulator. See [Running Your App on a Local Real Device](https://developer.huawei.com/consumer/en/doc/harmonyos-guides/ide-run-device) | [Signing an App Not Associated with a Registered App](https://developer.huawei.com/consumer/en/doc/harmonyos-guides/ide-signing#section151231211105010)
 
-## Build libqemu-system (Optional)
+If you only need a quick local test without source builds, the following prebuilt artifacts can be used. **Record their source URL, version and SHA-256 under `docs/` and mark them as not built from source.**
 
-Build your own `libqemu-system-aarch64.so` for `feature/hish_main/libs` on Ubuntu (or WSL2 on Windows), for customizing `libqemu`
+- [libs.zip](https://github.com/harmoninux/qemu/releases/download/hish-20260110/libs.zip) (extract to `feature/hish_main/libs`)
+- [kernel_aarch64](https://github.com/harmoninux/linux-config/releases/download/kernel-20260228/kernel_aarch64)
+- [rootfs_aarch64.qcow2](https://github.com/harmoninux/linux-config/releases/download/rootfs-20260117/rootfs_aarch64.qcow2)
+
+## Build libqemu-system
+
+Build your own `libqemu-system-aarch64.so` for `feature/hish_main/libs/<abi>/` on Ubuntu (or WSL2 on Windows).
 
 - Install dependencies
 ```shell
@@ -54,7 +61,7 @@ sudo apt install -y build-essential cmake curl wget unzip python3 libncurses-dev
 		git flex bison bash make autoconf libcurl4-openssl-dev tcl \
 		gettext zip pigz meson
 ```
-- Download "Command Line Tools" for Linux from https://developer.huawei.com/consumer/cn/download/
+- Download "Command Line Tools" for Linux from https://developer.huawei.com/consumer/cn/download/ (the public OpenHarmony Release SDK also works; differences are documented in the build policy)
 - Extract downloaded zip and set TOOL_HOME env variable to `command-line-tools` directory
 - Change current directory to `deps` and run `make`, for x86_64 emulator default
   - For real devices(aarch64), you can run `make aarch64`
@@ -64,72 +71,60 @@ cd deps
 make
 ```
 - See `*.so` files in `deps/output`
+
+The repository also ships a validated WSL pipeline, `scripts/build-source-linux.sh`, which builds GLib, Pixman, zlib, zstd, PCRE2, libffi, libslirp and QEMU from pinned sources and records the artifact hashes; `arm64-v8a` (devices) is the default, `TARGET_ARCH=x86_64` builds the emulator variant. See [docs/source-build-2026-11-14.md](docs/source-build-2026-11-14.md).
+
+## Build Linux kernel
+
+By default the kernel comes from the **latest 6.12 stable release on kernel.org** (currently 6.12.117). The script downloads the source, checks its SHA-256 against kernel.org's `sha256sums.asc`, verifies that file's PGP signature when the kernel signing key is in the local keyring, and builds `Image` with the project's `arm64_virt` configuration:
+
 ```shell
-ls -lh output
+# one-time import of the checksum signing key (optional but recommended)
+gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys 632D3A06589DA6B1
+
+# Run in WSL/Linux; without KERNEL_VERSION the script uses its current default
+KERNEL_VERSION=6.12.117 scripts/build-source-kernel.sh
 ```
 
-## Build Linux Kernel (Optional)
+The image is written to `.temp/source-build/images/kernel_aarch64`; copy it to `feature/hish_main/src/main/resources/rawfile/vm/kernel_aarch64`. When bumping the version, update the version, SHA-256 and PGP verification result recorded under `docs/`.
 
-Build your own Linux kernel for HiSH, for customizing Linux kernel
+A manual build is also possible (needs `aarch64-linux-gnu-gcc`, `bc`, `bison`, `flex`, `libssl-dev`, `libelf-dev`):
 
-- Install dependencies
-```shell
-sudo apt install build-essential gcc bc bison flex libssl-dev \
- libncurses5-dev libelf-dev gcc-aarch64-linux-gnu \
- clang lld llvm make 
-```
-- Clone linux kernel source to local
 ```shell
 git clone --depth=1 -b v6.12 https://github.com/torvalds/linux
-```
-- Download linux kernel build config
-```shell
 cd linux
 curl https://raw.githubusercontent.com/harmoninux/linux-config/refs/heads/master/arm64_virt > .config
+make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image
 ```
-- Build Linux kernel
-```shell
-export KCFLAGS='-march=armv8.5-a+crc+crypto+lse+rcpc+rng+sm4+sha3+dotprod+fp16 -mtune=neoverse-n1 -O2 -falign-functions=64 -fno-strict-aliasing -mllvm -vectorize-loops -mllvm -force-vector-width=2'
-env KCFLAGS="$KCFLAGS" make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 menuconfig
-env KCFLAGS="$KCFLAGS" make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 -j$(nproc)
-```
-- The kernel image is at `arch/arm64/boot/Image`, copy it to `feature/hish_main/src/main/resources/rawfile/vm/kernel_aarch64`
 
-## Build rootfs for Linux (Optional)
+Manual builds are for experimenting with the configuration; published images should come from the script so they can be reproduced and recorded.
 
-Build your own rootfs for HiSH
+## Build rootfs for Linux
 
-- Download and extract Alpine rootfs from [downloads | Alpine Linux](https://alpinelinux.org/downloads)
+By default the rootfs is assembled by script from the Alpine stable branch (currently 3.24.4) minirootfs plus `apk` packages, with HiSH's auto-login, serial console, 9p share, DHCP and guest agent configuration, then turned into ext4 and qcow2:
+
 ```shell
-mkdir alpine
-tar xvf alpine-minirootfs-3.22.1-aarch64.tar.gz -C alpine
+# Run in WSL/Linux; LAB must be on a filesystem that supports sparse files
+scripts/build-source-rootfs.sh
 ```
-- Use `qemu-img` to create a `rootfs.img` file
+
+The image is written to `.temp/source-build/images/rootfs_aarch64.qcow2`; copy it to `feature/hish_main/src/main/resources/rawfile/vm/rootfs_aarch64.qcow2`. The script also writes `rootfs_aarch64.qcow2.packages.txt` (distribution, repositories, the 34 packages and their versions), which is recorded in `manifest.json`. Tunables (`ALPINE_VER`, `SIZE`, `EXTRA_PACKAGES`, `OUT`, ...) are documented at the top of the script.
+
+The packages inside the image come from the official Alpine `main`/`community` repositories and are signature-checked by `apk` at install time. Per the build policy, those official packages are used as-is and do not require a source rebuild.
+
+You can unpack or mount the generated image to adjust its contents by hand, but images that go into a release must be reproducible from the script; manual edits are for experiments only.
+
+## Verify the artifacts
+
+Before committing images or libraries, run at least:
+
 ```shell
-qemu-img create -f raw rootfs.img 8G
+python scripts/verify-source-build.py     # ELF arch, Image/qcow2 headers, QEMU entry points, and committed images vs manifest
+scripts/smoke-vm-images.sh                # boot the new kernel and rootfs, 9 runtime checks
 ```
-- Make fs for `rootfs.img` file
-```shell
-mkfs.ext4 rootfs.img
-```
-- Mount `rootfs.img` as directory
-```shell
-sudo mkdir /mnt/rootfs
-sudo mount rootfs.img /mnt/rootfs
-```
-- Copy files of rootfs to `/mnt/rootfs`
-```shell
-sudo cp -r alpine/* /mnt/rootfs
-```
-- Unmount `/mnt/rootfs`
-```shell
-sudo umount /mnt/rootfs
-```
-- Convert raw img to qcow2 format
-```shell
-qemu-img convert -p -f raw -O qcow2 rootfs.img rootfs.qcow2
-```
-- Put `rootfs.qcow2` to `feature/hish_main/src/main/resources/rawfile/vm/rootfs_aarch64.qcow2`
+
+Then update `.temp/source-build/manifest.json` with `powershell -File scripts/record-source-build.ps1` and add a dated build record under `docs/`.
 
 # Star History
 

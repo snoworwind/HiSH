@@ -1,0 +1,30 @@
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+GLib already skips installing the gdb auto-load scripts when the target
+system is Windows, because the install path embeds the library directory
+and a Windows drive letter contains a colon.  When GLib is cross-built
+*on* Windows for a Linux target (as in the HiSH OHOS build), the target
+system is not Windows but the install path still contains "D:/..." and
+Meson's installer fails with WinError 123 after all libraries have been
+installed.
+
+Also skip the gdb auto-load scripts when the build machine is Windows.
+The scripts are debugging helpers and are not used by QEMU.
+
+--- a/glib/meson.build
++++ b/glib/meson.build
+@@ -528,11 +528,11 @@
+ gdb_conf = configuration_data()
+ gdb_conf.set('datadir', glib_datadir)
+ # This is also used in gobject/meson.build
+-if host_system != 'windows'
++if host_system != 'windows' and build_machine.system() != 'windows'
+   gdb_install = true
+ else
+-  # FIXME: Cannot install on Windows because the path will contain a drive
+-  # letter and colons are not allowed in paths.
++  # FIXME: Cannot install on Windows (host or build machine) because the path
++  # will contain a drive letter and colons are not allowed in paths.
+   gdb_install = false
+ endif
+ 

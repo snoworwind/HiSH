@@ -109,11 +109,12 @@ function startVm(options: VmOptions): boolean {
     fs.mkdirSync(options.sharedFolder)
   }
 
-  // 上架应用市场的包（app.hackeris.hish）因商店政策限制不支持 JIT，只能走 TCI；
-  // 其余包名（源码构建/开发版 dev.hackeris.hish 等）启用 JIT
+  // 上架应用市场的包因商店政策限制不支持 JIT，只能走 TCI；
+  // 其余包名（源码构建/开发版 dev.snoworwind.hish 等）启用 JIT
   const appBundleName: string = bundleManager.getBundleInfoForSelfSync(
     bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT).name;
-  const supportJit: boolean = appBundleName !== 'app.hackeris.hish';
+  const marketBundles: string[] = ['app.hackeris.hish', 'app.snoworwind.hish'];
+  const supportJit: boolean = !marketBundles.includes(appBundleName);
 
   const started: boolean = napi.startVM({
     argsLines: args.join('\n'),
