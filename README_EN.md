@@ -2,7 +2,9 @@
 
 [GitHub](https://github.com/harmoninux/HiSH) | [GitCode](https://gitcode.com/realhackeris/HiSH) | [Gitee](https://gitee.com/hackeris/HiSH) | [中文](README.md)
 
-Run Linux Shell on HarmonyOS devices! Based on [qemu-ohos](https://github.com/harmoninux/qemu), both 2in1(PC), Tablet and Phone are supported.
+Run Linux Shell on HarmonyOS devices! Based on [qemu-ohos](https://github.com/snoworwind/qemu-ohos), both 2in1(PC), Tablet and Phone are supported.
+
+The QEMU component is the maintained [qemu-ohos](https://github.com/snoworwind/qemu-ohos) fork of official stable **11.1.3**, pinned in `deps/libqemu/source.env`. Development builds on phones, tablets and PCs use **JIT** by default; TCI is an explicit compatibility option. See the [component upgrade record](docs/qemu-component-2026-11-14.md).
 
 ![On multiple devices](docs/images/devices.png)
 

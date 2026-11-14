@@ -6,32 +6,34 @@
 
 ## 默认流水线
 
-构建在 Linux（或 Windows WSL2）中执行，部分依赖脚本也可直接在 Windows PowerShell 中运行，脚本都放在 `scripts/`。产物默认写到 `.temp/source-build/`，随后复制进仓库。
+构建在 Linux（或 Windows WSL2）中执行，部分依赖脚本也可直接在 Windows PowerShell 中运行，脚本都放在 `scripts/`。产物默认写到 `.temp/source-build/`，随后由 `scripts/install-qemu-libs.py` 安装 QEMU 打包库，镜像另行复制。
 
 | 步骤 | 命令 | 产物与去向 |
 | --- | --- | --- |
-| 1. 原生依赖与 QEMU | `OHOS_SDK_HOME=/path/to/ohos-sdk/linux scripts/build-source-linux.sh all`；模拟器的 x86_64 版本加 `TARGET_ARCH=x86_64` | `.temp/source-build/linux/qemu-build/` 或 `.temp/source-build/linux-x86_64/qemu-build/` 下的 `libqemu-system-aarch64.so`、`libqemu-img.so`、`libslirp.so.0.4.0`，手动复制到 `feature/hish_main/libs/<abi>/` |
+| 1. 原生依赖与 QEMU | `OHOS_SDK_HOME=/path/to/ohos-sdk/linux scripts/build-source-linux.sh all`；模拟器的 x86_64 版本加 `TARGET_ARCH=x86_64` | `.temp/source-build/linux/qemu-build/` 或 `.temp/source-build/linux-x86_64/qemu-build/` 下的 `libqemu-system-aarch64.so`、`libqemu-img.so`、`libslirp.so.0.4.0`，用 `python scripts/install-qemu-libs.py` 安装到 `feature/hish_main/libs/<abi>/` |
 | 1b. Windows 工具链备选 | `scripts/build-source-deps.ps1`、`scripts/build-source-meson.ps1 -Only pixman\|glib` | `.temp/source-build/install/` |
 | 2. 内核 | `KERNEL_VERSION=<6.12 最新 LTS> scripts/build-source-kernel.sh` | `.temp/source-build/images/kernel_aarch64`，手动复制到 `feature/hish_main/src/main/resources/rawfile/vm/kernel_aarch64` |
 | 3. 根文件系统 | `scripts/build-source-rootfs.sh` | `.temp/source-build/images/rootfs_aarch64.qcow2`，手动复制到 `feature/hish_main/src/main/resources/rawfile/vm/rootfs_aarch64.qcow2` |
-| 4. 格式校验 | `python scripts/verify-source-build.py` | 检查 ELF 架构、内核 Image 头、qcow2 头、QEMU 入口符号，并比对 `rawfile/vm/` 镜像与 manifest 哈希 |
+| 4. 格式校验 | `python scripts/verify-source-build.py [phone.hap tablet.hap ...]` | 检查 ELF 架构、内核 Image 头、qcow2 头、QEMU 入口符号，并比对 `rawfile/vm/` 镜像与 manifest 哈希；传入 HAP 时另外核对包内 QEMU 库的架构、导出符号和版本 |
 | 5. 启动验证 | `scripts/smoke-vm-images.sh` | 启动新内核与 rootfs，串口、9p、网络、guest agent 共 9 项检查 |
 | 6. 记录 | `powershell -File scripts/record-source-build.ps1` | 更新 `.temp/source-build/manifest.json`；同时在 `docs/` 新增一份带日期的构建记录 |
+
+可选 TCI 构建使用 `QEMU_TCI=1 scripts/build-source-linux.sh qemu`；不会覆盖默认 JIT 产物。手机开发版也默认使用 JIT。
 
 替换仓库内镜像前先备份原文件，例如 `.temp/source-build/original-images/`。
 
 ## 当前状态
 
 - 内核 6.12.117 与 Alpine 3.24.4 rootfs 已按本策略生成并替换进 `feature/hish_main/src/main/resources/rawfile/vm/`。
-- QEMU 及其依赖已按本策略从源码构建，替换进 `feature/hish_main/libs/arm64-v8a/` 和 `feature/hish_main/libs/x86_64/`，并随 `phone`、`tablet` 的 HAP 一起打包（打包时由 hvigor 做 strip）。arm64-v8a 用默认参数构建，x86_64 用 `TARGET_ARCH=x86_64` 构建。已在 HarmonyOS 真机上安装并启动验证，内核、rootfs 和 QEMU 库都被正确加载（见 `docs/vm-images-2026-11-14.md` 的“真机验证”一节）。
+- QEMU 及其依赖已按本策略从源码构建，替换进 `feature/hish_main/libs/arm64-v8a/` 和 `feature/hish_main/libs/x86_64/`，并随 `phone`、`tablet` 的 HAP 一起打包（打包时由 hvigor 做 strip）。arm64-v8a 用默认参数构建，x86_64 用 `TARGET_ARCH=x86_64` 构建。当前 QEMU 已升级至自维护 11.1.3 定制组件，并已在 phone 真机（SGT-AL10，API 26）上完成冷启动、9p、网络与 `fstrim` 验证；未验证项见 `docs/qemu-component-2026-11-14.md`。
 - `phone`、`tablet` 的 HAP 已在 DevEco Studio 里用自动签名完成签名，签名材料位于 `~/.ohos/config`，`build-profile.json5` 在 `.gitignore` 中；`hap-sign-tool verify-app` 验证通过。
-- `scripts/verify-source-build.py` 会比对 `rawfile/vm/` 中镜像与 `manifest.json` 记录的哈希，防止镜像被悄悄换回来源不明的版本。
+- `scripts/verify-source-build.py` 会比对 `rawfile/vm/` 中镜像与 `manifest.json` 记录的哈希，防止镜像被悄悄换回来源不明的版本；带上 HAP 路径时还会核对包内 QEMU 库，确认打包的是当前固定的 11.1.3 组件。
 
 ## 版本规则
 
 - **内核**：始终使用 kernel.org 上 6.12 系列最新的长期支持版本（当前 6.12.117），不要用 `master` 或未发布的 rc 快照。下载 kernel.org 的压缩包并对照 `sha256sums.asc` 校验 SHA-256；本地导入了内核校验和签名公钥（`gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys 632D3A06589DA6B1`）时，脚本同时校验该文件的 PGP 签名，构建记录里要写明是否完成了签名校验。
 - **根文件系统**：使用 Alpine 最新稳定分支（当前 3.24.4），从官方 minirootfs 加 `apk` 包组装，结构和定制项由 `scripts/build-source-rootfs.sh` 固定。
-- **QEMU**：`github.com/harmoninux/qemu` 的 `hish-libqemu` 分支，固定提交（当前 `50ce7096`），不跟随分支更新。`arm64-v8a`（真机）与 `x86_64`（模拟器）都从同一提交构建。
+- **QEMU**：`github.com/snoworwind/qemu-ohos` 的 `ohos-11.1` 分支，基于官方稳定版 11.1.3，由 `deps/libqemu/source.env` 固定提交 `dc9805c171d93e095bcd7611933fadc8ab847abd`，不跟随分支更新。`arm64-v8a`（真机）与 `x86_64`（模拟器）都从同一提交构建。
 - **QEMU 依赖**：GLib、Pixman、zlib、zstd、PCRE2、libffi 使用固定源码包版本，具体见 `.temp/source-build/manifest.json` 与 `docs/source-build-2026-11-14.md`。
 - **华为工具链**：允许使用官方发行的 DevEco Studio、HarmonyOS SDK 和签名工具。Linux 侧使用公开的 OpenHarmony SDK 时，必须在文档中写明与华为 SDK 的差异（clang 版本、LLVM 提交等）。
 
