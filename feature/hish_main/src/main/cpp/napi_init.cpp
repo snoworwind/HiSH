@@ -58,15 +58,15 @@ static QemuSystemEntry getQemuSystemEntry(bool supportJit) {
         return qemuSystemEntry;
     }
 
-    // 根据设备类型选择 .so：phone 用 TCI，tablet/2in1 用 JIT
+    // 根据调用方的包分发策略选择库：开发版（包括 phone）用 JIT，市场版用 TCI
     void *libQemuHandle = nullptr;
 
     if (supportJit) {
-        // tablet/2in1: 直接加载 JIT 版本
+        // 开发版（phone/tablet/2in1）：直接加载 JIT 版本
         OH_LOG_INFO(LOG_APP, "Loading QEMU: libqemu-system-aarch64.so (JIT)");
         libQemuHandle = dlopen("libqemu-system-aarch64.so", RTLD_LAZY);
     } else {
-        // phone: 优先加载 TCI 版本，失败则回退到 JIT 版本
+        // 禁用 JIT 的分发包：优先加载 TCI 版本，失败则回退到 JIT 版本
         OH_LOG_INFO(LOG_APP, "Loading QEMU: libqemu-system-aarch64-tci.so (TCI)");
         libQemuHandle = dlopen("libqemu-system-aarch64-tci.so", RTLD_LAZY);
         if (!libQemuHandle) {

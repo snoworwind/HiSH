@@ -30,8 +30,8 @@ x86_64: clean_libqemu
 aarch64: clean_libqemu
 	$(MAKE) copy OHOS_ARCH=aarch64 OHOS_ABI=arm64-v8a
 
-# Build for aarch64 phones without JIT support. This keeps the regular
-# aarch64 target unchanged and enables QEMU's TCG interpreter (TCI) only
+# Optional compatibility build for distributions without JIT permission.
+# This keeps the regular aarch64 target unchanged and enables QEMU's TCG interpreter (TCI) only
 # for this build.
 aarch64-tci: clean_libqemu
 	$(MAKE) copy OHOS_ARCH=aarch64 OHOS_ABI=arm64-v8a QEMU_TCI=1
@@ -44,12 +44,13 @@ clean_libqemu:
 copy: output/.stamp
 
 output/.stamp: $(STAMP) Makefile
-	rm -f ../feature/hish_main/libs/$(OHOS_ABI)/*
 	cp output/*.so ../feature/hish_main/libs/$(OHOS_ABI)/
 	cp output/*.so.* ../feature/hish_main/libs/$(OHOS_ABI)/
 	mkdir -p ../feature/hish_main/src/main/resources/rawfile/vm/keymaps
 	cp output/en-us ../feature/hish_main/src/main/resources/rawfile/vm/keymaps/
 	touch output/.stamp
+
+libqemu/.stamp: libqemu/source.env
 
 %/.stamp: %/Makefile
 	make -C $(patsubst %/.stamp,%,$@) OHOS_ARCH=$(OHOS_ARCH) OHOS_ABI=$(OHOS_ABI) QEMU_TCI=$(QEMU_TCI)

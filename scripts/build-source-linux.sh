@@ -31,6 +31,11 @@ install="$archwork/install"
 cross="$archwork/ohos-$arch.ini"
 logs="$base/logs"
 jobs=${JOBS:-$(nproc)}
+source "$root/deps/libqemu/source.env"
+qemu_src="$work/src/qemu-$QEMU_REVISION"
+qemu_mode=${QEMU_TCI:-0}
+qemu_suffix=
+[ "$qemu_mode" = 1 ] && qemu_suffix=-tci
 
 log() { printf '== %s\n' "$*"; }
 
@@ -52,14 +57,9 @@ prepare_sources() {
   mkdir -p "$src"
   for d in "$base/src"/*; do
     name=$(basename "$d")
-    [ "$name" = qemu ] && continue
+    [[ "$name" = qemu* ]] && continue
     cp -a "$d" "$src/$name"
   done
-  # Export QEMU from its git object store: a plain copy from the Windows
-  # checkout carries CRLF line endings into the shell scripts. The tree is
-  # pinned by the commit recorded in docs/source-build-2026-11-14.md.
-  mkdir -p "$src/qemu"
-  git -c safe.directory='*' -C "$base/src/qemu" archive --format=tar HEAD | tar -x -C "$src/qemu"
   touch "$work/.sources-ready"
 }
 
@@ -145,55 +145,50 @@ build_deps() {
     -Dintrospection=disabled -Dnls=disabled
 }
 
+prepare_qemu() {
+  local checkout="$base/src/qemu-ohos"
+  if [ ! -d "$checkout/.git" ]; then
+    git clone --no-checkout --depth 1 --branch "$QEMU_BRANCH" "$QEMU_REPOSITORY" "$checkout"
+  fi
+  if ! git -c safe.directory="$checkout" -C "$checkout" cat-file -e "$QEMU_REVISION^{commit}" 2>/dev/null; then
+    git -c safe.directory="$checkout" -C "$checkout" fetch --depth 1 "$QEMU_REPOSITORY" "$QEMU_REVISION"
+  fi
+  # Export the pinned object, not the checkout's mutable HEAD or working tree.
+  if [ ! -f "$qemu_src/.hish-source-revision" ]; then
+    mkdir -p "$qemu_src"
+    git -c safe.directory="$checkout" -c core.autocrlf=false -C "$checkout" archive --format=tar "$QEMU_REVISION" | tar -x -C "$qemu_src"
+    printf '%s\n' "$QEMU_REVISION" > "$qemu_src/.hish-source-revision"
+  fi
+  test "$(cat "$qemu_src/.hish-source-revision")" = "$QEMU_REVISION"
+}
+
 build_qemu() {
   require_sdk
-  prepare_sources
-  local build="$archwork/build/qemu" logfile="$logs/qemu-linux.log"
-  mkdir -p "$build"
-  cd "$build"
-  # Use the code generators that belong to the GLib being linked. Ubuntu's
-  # system gdbus-codegen is newer than 2.82 and emits calls to API that 2.82
-  # does not provide.
-  export PATH="$install/bin:$PATH"
-  log "qemu configure"
-  # LDFLAGS hides the statically linked dependency symbols so the library
-  # exports the same surface as the released build instead of re-exporting
-  # zlib, PCRE2, libffi and GLib internals.
-  PKG_CONFIG_PATH= \
-  PKG_CONFIG_LIBDIR="$install/lib/pkgconfig:$install/share/pkgconfig" \
-  CFLAGS="$lse_flag -D_UAPI_LINUX_VIRTIO_VSOCK_H -D_UAPI_LINUX_VIRTIO_TYPES_H -D_UAPI_LINUX_VIRTIO_RING_H -D_UAPI_LINUX_VIRTIO_PMEM_H -D_UAPI_LINUX_VIRTIO_NET_H -D_UAPI_LINUX_VIRTIO_IOMMU_H -D_UAPI_LINUX_VIRTIO_FS_H -D_UAPI_LINUX_VIRTIO_CONSOLE_H -D_UAPI_LINUX_VIRTIO_CONFIG_H -D_LINUX_SYSINFO_H -UHAVE_OPENAT2_H -D__user= -D__force= -Wno-unused-command-line-argument -I$install/include/glib-2.0 -I$install/lib/glib-2.0/include -I$install/include/pixman-1 -L$install/lib" \
-  LDFLAGS="-Wl,--exclude-libs,libglib-2.0.a -Wl,--exclude-libs,libgio-2.0.a -Wl,--exclude-libs,libgobject-2.0.a -Wl,--exclude-libs,libgmodule-2.0.a -Wl,--exclude-libs,libgthread-2.0.a -Wl,--exclude-libs,libgirepository-2.0.a -Wl,--exclude-libs,libz.a -Wl,--exclude-libs,libpcre2-8.a -Wl,--exclude-libs,libffi.a -Wl,--exclude-libs,libintl.a" \
-  CC="$native/llvm/bin/$arch-unknown-linux-ohos-clang" \
-  CXX="$native/llvm/bin/$arch-unknown-linux-ohos-clang++" \
-  "$src/qemu/configure" --target-list=aarch64-softmmu --cross-prefix= --host-cc=cc \
-    --disable-kvm --disable-xen --disable-rust --disable-docs --disable-werror \
-    --enable-tcg --enable-lto --enable-strip --with-coroutine=sigaltstack \
-    --enable-trace-backends=nop --disable-qom-cast-debug --disable-stack-protector \
-    --disable-bsd-user --disable-guest-agent --disable-gcrypt --disable-debug-info \
-    --disable-debug-tcg --enable-attr --disable-brlapi --disable-linux-aio \
-    --disable-bzip2 --disable-cap-ng --disable-curl --disable-glusterfs \
-    --disable-gnutls --disable-nettle --disable-gtk --disable-rdma --disable-libiscsi \
-    --disable-vnc-jpeg --disable-lzo --disable-curses --disable-libnfs --disable-numa \
-    --disable-opengl --disable-rbd --disable-vnc-sasl --disable-sdl --disable-seccomp \
-    --disable-smartcard --disable-snappy --disable-spice --disable-libusb \
-    --disable-usb-redir --disable-vde --disable-vhost-net --disable-virglrenderer \
-    --disable-vte --disable-xen-pci-passthrough --enable-tools --disable-libudev \
-    --disable-passt --enable-pixman --enable-vnc --enable-slirp --enable-virtfs \
-    > "$logfile" 2>&1
-  log "qemu make"
-  make libqemu-system-aarch64.so -j "$jobs" >> "$logfile" 2>&1
-  make libqemu-img.so -j "$jobs" >> "$logfile" 2>&1
+  prepare_qemu
+  mkdir -p "$logs"
+  local build="$archwork/build/qemu-$QEMU_REVISION$qemu_suffix"
+  local logfile="$logs/qemu-$arch$qemu_suffix-linux.log"
+  log "QEMU $QEMU_VERSION $QEMU_REVISION ($arch, TCI=$qemu_mode)"
+  OHOS_SDK_HOME="$sdk" OHOS_DEPS_PREFIX="$install" TARGET_ARCH="$arch" \
+    QEMU_TCI="$qemu_mode" BUILD_DIR="$build" JOBS="$jobs" \
+    bash "$qemu_src/scripts/ohos/build.sh" > "$logfile" 2>&1
+  bash "$qemu_src/scripts/ohos/verify.sh" "$build" "$arch" >> "$logfile" 2>&1
   log "qemu artifacts built in $build"
 }
 
 sync_results() {
   mkdir -p "$stage"
   rsync -a --delete "$install/" "$stage/install/"
-  if [ -d "$archwork/build/qemu" ]; then
+  local build="$archwork/build/qemu-$QEMU_REVISION$qemu_suffix"
+  if [ -d "$build" ]; then
     mkdir -p "$stage/qemu-build"
-    cp -f "$archwork/build/qemu/libqemu-system-aarch64.so" "$stage/qemu-build/" 2>/dev/null || true
-    cp -f "$archwork/build/qemu/libqemu-img.so" "$stage/qemu-build/" 2>/dev/null || true
-    cp -f "$archwork/build/qemu/subprojects/slirp/libslirp.so.0.4.0" "$stage/qemu-build/" 2>/dev/null || true
+    if [ "$qemu_mode" = 1 ]; then
+      cp -f "$build/libqemu-system-aarch64-tci.so" "$stage/qemu-build/"
+    else
+      cp -f "$build/libqemu-system-aarch64.so" "$build/libqemu-img.so" "$stage/qemu-build/"
+      cp -f "$build/subprojects/slirp/libslirp.so.0.4.0" "$stage/qemu-build/"
+    fi
+    printf '%s\n' "$QEMU_REVISION" > "$stage/qemu-build/source-revision$qemu_suffix.txt"
   fi
   log "results copied to $stage"
 }

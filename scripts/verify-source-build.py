@@ -1,16 +1,22 @@
 """Check rebuilt artifacts: ELF architecture, Linux arm64 Image header, QEMU entry
 points, and that the libraries and images committed to the repo match the build.
 
-Usage: python scripts/verify-source-build.py
+Usage: python scripts/verify-source-build.py [phone.hap tablet.hap ...]
 """
 from __future__ import annotations
 
 from pathlib import Path
 import hashlib
 import struct
+import sys
+import tempfile
+from zipfile import ZipFile
 
 root = Path(__file__).resolve().parent.parent
 base = root / '.temp/source-build'
+qemu_source = dict(line.split('=', 1) for line in
+                   (root / 'deps/libqemu/source.env').read_text().splitlines()
+                   if line and not line.startswith('#'))
 MACHINES = {183: 'AArch64', 62: 'x86-64'}
 install_dirs = [base / 'install', base / 'linux/install', base / 'linux-x86_64/install']
 qemu_builds = {
@@ -48,7 +54,9 @@ def dynamic_symbols(path: Path) -> set[str]:
         count = sh_size // sh_entsize if sh_entsize else 0
         for index in range(count):
             off = sh_offset + index * sh_entsize
-            st_name, = struct.unpack_from('<I', data, off)
+            st_name, st_info, st_other, st_shndx = struct.unpack_from('<IBBH', data, off)
+            if st_shndx == 0 or st_info >> 4 not in (1, 2) or st_other & 3 != 0:
+                continue  # Require a defined, exported GLOBAL/WEAK symbol.
             end = data.index(b'\0', strtab[1] + st_name)
             symbols.add(data[strtab[1] + st_name:end].decode())
     return symbols
@@ -100,7 +108,8 @@ committed = {
 if manifest_path.exists():
     import json
 
-    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8-sig'))
+    assert manifest['sourceCommits']['qemu'] == qemu_source['QEMU_REVISION'], 'manifest QEMU revision is stale'
     recorded = {Path(entry['file']).name: entry['sha256'] for entry in manifest.get('images', [])}
     for name, path in committed.items():
         if name not in recorded:
@@ -122,6 +131,8 @@ for abi, build in qemu_builds.items():
     if not system_lib.exists():
         print(f'not built yet: {system_lib.relative_to(base)}')
         continue
+    revision = build / 'source-revision.txt'
+    assert revision.read_text().strip() == qemu_source['QEMU_REVISION'], f'{build}: stale QEMU build'
     machine = check_elf(system_lib, expected)
     symbols = dynamic_symbols(system_lib)
     assert 'qemu_system_entry' in symbols, f'{system_lib} lacks qemu_system_entry'
@@ -131,18 +142,47 @@ for abi, build in qemu_builds.items():
     print(f'{machine} ELF OK with qemu_system_entry/qemu_img_entry exports: {system_lib.relative_to(base)} '
           f'({system_lib.stat().st_size} bytes)')
 
-    # The libraries committed to feature/hish_main/libs must be the ones just built.
+    # The libraries installed in feature/hish_main/libs must be the ones just built.
     installed = root / f'feature/hish_main/libs/{abi}'
     for built, name in ((system_lib, 'libqemu-system-aarch64.so'),
                         (img_lib, 'libqemu-img.so'),
                         (slirp, 'libslirp.so.0')):
         candidate = installed / name
         if not candidate.exists():
-            print(f'WARNING: missing committed library {candidate.relative_to(root)}')
+            print(f'WARNING: missing installed library {candidate.relative_to(root)}')
             continue
         same = hashlib.sha256(built.read_bytes()).hexdigest() == hashlib.sha256(candidate.read_bytes()).hexdigest()
         assert same, f'{candidate} is not the library built by scripts/build-source-linux.sh'
-        print(f'committed {abi}/{name} matches the source build')
+        print(f'installed {abi}/{name} matches the source build')
+
+    tci = build / 'libqemu-system-aarch64-tci.so'
+    if tci.exists():
+        tci_revision = build / 'source-revision-tci.txt'
+        assert tci_revision.read_text().strip() == qemu_source['QEMU_REVISION'], 'stale TCI build'
+        check_elf(tci, expected)
+        assert 'qemu_system_entry' in dynamic_symbols(tci), f'{tci}: missing entry'
+        candidate = installed / tci.name
+        assert candidate.exists(), f'{candidate}: missing TCI library'
+        assert hashlib.sha256(tci.read_bytes()).digest() == hashlib.sha256(candidate.read_bytes()).digest(), 'installed TCI differs from build'
+        print(f'installed {abi}/{tci.name} matches the source build')
+
+for hap_name in sys.argv[1:]:
+    hap = Path(hap_name)
+    with ZipFile(hap) as archive, tempfile.TemporaryDirectory(prefix='hap-qemu-', dir=base) as temp:
+        for abi, expected in [('arm64-v8a', 183), ('x86_64', 62)]:
+            installed = root / 'feature/hish_main/libs' / abi
+            names = ['libqemu-system-aarch64.so', 'libqemu-img.so', 'libslirp.so.0']
+            if (installed / 'libqemu-system-aarch64-tci.so').exists():
+                names.append('libqemu-system-aarch64-tci.so')
+            for name in names:
+                data = archive.read(f'libs/{abi}/{name}')
+                extracted = Path(temp) / name
+                extracted.write_bytes(data)
+                check_elf(extracted, expected)
+                assert dynamic_symbols(extracted) == dynamic_symbols(installed / name), f'{hap}: stale symbol table for {abi}/{name}'
+                if name.startswith('libqemu'):
+                    assert qemu_source['QEMU_VERSION'].encode() in data, f'{hap}: stale QEMU version in {abi}/{name}'
+                print(f'packaged {hap.name}: {abi}/{name} OK')
 
 print(f'{checked} shared library files have the expected ELF64 headers')
 print('These are format checks, not runtime tests.')

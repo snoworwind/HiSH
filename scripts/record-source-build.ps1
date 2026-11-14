@@ -2,6 +2,10 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $base = Join-Path $root '.temp/source-build'
 $sdk = 'D:/D Program Files/DevEco Studio/sdk/default/openharmony/native'
+$qemuSource = @{}
+Get-Content (Join-Path $root 'deps/libqemu/source.env') | ForEach-Object {
+  if ($_ -match '^([A-Z_]+)=(.+)$') { $qemuSource[$Matches[1]] = $Matches[2] }
+}
 $inputs = Get-ChildItem "$base/downloads" -File | Where-Object { $_.Name -match '\.(tar\.(gz|xz)|whl)$|^kernel-config$' } | ForEach-Object {
   @{ file=$_.Name; sha256=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(); bytes=$_.Length }
 }
@@ -55,14 +59,14 @@ $manifest = @{
     libffi='https://gitlab.freedesktop.org/gstreamer/meson-ports/libffi.git (revision meson)'
     proxyLibintl='https://github.com/frida/proxy-libintl.git (tag 0.4)'
     glib='https://download.gnome.org/sources/glib/2.82/glib-2.82.0.tar.xz'
-    qemu='https://github.com/harmoninux/qemu (branch hish-libqemu)'
+    qemu="$($qemuSource.QEMU_REPOSITORY) (branch $($qemuSource.QEMU_BRANCH), QEMU $($qemuSource.QEMU_VERSION))"
     linux='https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.tar.xz'
     kernelConfig='https://raw.githubusercontent.com/harmoninux/linux-config/refs/heads/master/arm64_virt'
   }
   sourceCommits=@{
     libffi='83d0cfd00d7d37af4b4349511d29f1f0512621b3'
     proxyLibintl='c03e1a74b17fa7ec467e110130775409e4828a4c'
-    qemu='50ce7096eb6b338bee88a0960c543f93f1b16959'
+    qemu=$qemuSource.QEMU_REVISION
   }
   patches=$patches
   inputs=$inputs
@@ -73,8 +77,8 @@ $manifest = @{
   kernelRelease=$kernelRelease
   packages=$packages
   installedLibs=$installedLibs
-  installedLibsNote='feature/hish_main/libs/arm64-v8a and feature/hish_main/libs/x86_64 hold the libraries built by scripts/build-source-linux.sh (QEMU plus a statically linked zlib/PCRE2/GLib). arm64-v8a is built with TARGET_ARCH=aarch64 (default); x86_64 with TARGET_ARCH=x86_64.'
-  packagesNote='HAPs are built from this working tree with hvigor (debug, product=default) and contain the source-built arm64-v8a libraries plus the 6.12.117 kernel and Alpine 3.24.4 rootfs. They are unsigned because build-profile.json5 has no signingConfigs; the local provisioning profiles under ~/.ohos/config expired on 2026-08-08 and the keystore passwords are managed by DevEco.'
+  installedLibsNote='feature/hish_main/libs/arm64-v8a and feature/hish_main/libs/x86_64 hold the libraries built by scripts/build-source-linux.sh (QEMU 11.1.3 from the pinned snoworwind/qemu-ohos fork plus statically linked zlib/PCRE2/GLib). arm64-v8a is built with TARGET_ARCH=aarch64 (default); x86_64 with TARGET_ARCH=x86_64.'
+  packagesNote='HAP entries describe files found at recording time. Rebuild after component changes; inspect packaged libraries and verify signatures independently. Presence of a HAP does not establish runtime validation.'
   vmImages=@{
     kernel='feature/hish_main/src/main/resources/rawfile/vm/kernel_aarch64'
     rootfs='feature/hish_main/src/main/resources/rawfile/vm/rootfs_aarch64.qcow2'

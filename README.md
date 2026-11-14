@@ -2,7 +2,9 @@
 
 [GitHub](https://github.com/harmoninux/HiSH) | [GitCode](https://gitcode.com/realhackeris/HiSH) | [Gitee](https://gitee.com/hackeris/HiSH) | [English](README_EN.md)
 
-在HarmonyOS设备上运行Linux Shell。基于[qemu-ohos](https://github.com/harmoninux/qemu)，支持2in1(PC)、平板和手机。
+在HarmonyOS设备上运行Linux Shell。基于[qemu-ohos](https://github.com/snoworwind/qemu-ohos)，支持2in1(PC)、平板和手机。
+
+当前 QEMU 组件为自维护的 [qemu-ohos](https://github.com/snoworwind/qemu-ohos)，基于官方稳定版 **11.1.3**；来源和提交固定在 `deps/libqemu/source.env`。手机、平板和 PC 的开发版默认使用 **JIT**，TCI 仅作显式兼容选项。构建与迁移记录见 [QEMU 组件升级](docs/qemu-component-2026-11-14.md)。
 
 ![多设备运行](docs/images/devices.png)
 
