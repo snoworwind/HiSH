@@ -7,9 +7,66 @@ var term = null;
 // once their FontFace finishes loading asynchronously.
 var currentFontFamily = 'Default';
 
+// 渲染器选择：固定使用 DOM 渲染器。
+//
+// xterm.js 6 的核心只带 DOM 渲染器，WebGL 是 addon；这里保留 addon 与切换代码，
+// 但默认/当前固定关闭，原因：
+//   1. 触摸设备的长按取词/复制依赖浏览器对 DOM 文本的原生选择，WebGL 渲染器
+//      没有可选择的文本节点（xterm 6 也没有触摸选择实现）；
+//   2. 部分设备上 WebGL 出现过镜像/花屏，DOM 渲染最稳。
+// 需要重新评估 WebGL 时，把 ENABLE_WEBGL 改为 true 即可（加载失败/上下文丢失
+// 会自动回退 DOM；关闭斜体时也会回退 DOM）。
+let ENABLE_WEBGL = false;
+let webglAddonInstance = null;
+// 用户是否允许斜体（DOM 渲染器下由 term.css 的 italics-off 控制；WebGL 下
+// 无法用 CSS 关掉斜体，因此关闭斜体时直接退回 DOM 渲染器）。
+let italicsEnabled = true;
+
+function enableWebGLRenderer() {
+    if (!ENABLE_WEBGL || webglAddonInstance || !term || typeof WebglAddon === 'undefined') {
+        return;
+    }
+    try {
+        const addon = new WebglAddon.WebglAddon();
+        addon.onContextLoss(() => {
+            console.warn('WebGL context lost, falling back to DOM renderer');
+            try { addon.dispose(); } catch (e) { /* ignore */ }
+            if (webglAddonInstance === addon) {
+                webglAddonInstance = null;
+            }
+        });
+        term.loadAddon(addon);
+        webglAddonInstance = addon;
+        console.log('WebGL renderer loaded');
+    } catch (e) {
+        console.warn('WebGL renderer failed to load, falling back to DOM', e);
+    }
+}
+
+function disableWebGLRenderer() {
+    if (!webglAddonInstance) {
+        return;
+    }
+    try {
+        webglAddonInstance.dispose();
+    } catch (e) {
+        console.warn('WebGL renderer dispose failed', e);
+    }
+    webglAddonInstance = null;
+}
+
 // Initialize Addons (constructed upfront; attached to term in createTerminal)
 const fitAddon = new FitAddon.FitAddon();
-const webglAddon = new WebglAddon.WebglAddon();
+// Unicode 15 + 字素簇（grapheme）宽度：让 emoji、ZWJ 组合、VS16 等占用
+// 与现代终端（以及 Node 侧 string-width）一致的单元格数。
+let unicodeGraphemesAddon = null;
+try {
+    if (typeof UnicodeGraphemesAddon !== 'undefined') {
+        unicodeGraphemesAddon = new UnicodeGraphemesAddon.UnicodeGraphemesAddon();
+    }
+} catch (e) {
+    console.warn('Unicode graphemes addon unavailable', e);
+}
 
 // Initialize exports for ArkTS to call
 window.exports = {};
@@ -115,9 +172,9 @@ function strToUint8Array(str) {
 }
 
 // Creates the xterm.js Terminal instance.
-// NOTE: This xterm.js build ships with the DOM renderer only (no
-// canvas/WebGL/rendererType option), so ligature and italic suppression
-// are both handled purely via CSS classes on <body> — see term.css.
+// xterm.js 6 ships only the DOM renderer in core; the WebGL renderer is an
+// addon (loaded later, with DOM fallback). Ligature and italic suppression are
+// still handled purely via CSS classes on <body> — see term.css.
 function createTerminal() {
     var ligatures = false;
     var italic = true;
@@ -138,6 +195,7 @@ function createTerminal() {
     if (!italic) {
         document.body.classList.add('italics-off');
     }
+    italicsEnabled = italic;
 
     var options = {
         cursorBlink: true,
@@ -157,6 +215,17 @@ function createTerminal() {
     term = new Terminal(options);
     term.loadAddon(fitAddon);
 
+    // Unicode 15 + 字素簇宽度（emoji/组合字符）。加载后 xterm 会自动把
+    // activeVersion 切到 "15-graphemes"；失败时保持默认 Unicode 6 表。
+    if (unicodeGraphemesAddon) {
+        try {
+            term.loadAddon(unicodeGraphemesAddon);
+            console.log('Unicode width provider: ' + term.unicode.activeVersion);
+        } catch (e) {
+            console.warn('Unicode graphemes addon failed to load', e);
+        }
+    }
+
     // Link clicks
     term.options.linkHandler = {
         activate: (e, text) => {
@@ -175,9 +244,6 @@ window.onload = function () {
     const maxRetries = 10;
 
     function initialize() {
-        // Disable WebGL as per user request (Compatibility Mode)
-        let shouldEnableWebGL = false;
-
         // Check if native is ready
         if (!window.native && retryCount < maxRetries) {
             console.log(`Waiting for native object... (${retryCount + 1}/${maxRetries})`);
@@ -198,12 +264,13 @@ window.onload = function () {
                 return;
             }
 
-            // 1. Setup event listeners and sync preferences FIRST
-            //    确保 term.onResize 在 fitAddon.fit() 之前设置好，
-            //    这样首次 fit 的 resize 事件才能触发 native.resize() 发送给 VM 内核
+            // 1. Setup event listeners BEFORE syncing preferences:
+            //    syncPrefs() 里的 setFontFamily 会调用 fitAddon.fit()，如果
+            //    onResize 还没注册，首次 fit 就不会通知 native，guest 的 tty
+            //    尺寸会一直停留在开机时 busybox resize 的值。
             try {
-                syncPrefs();
                 setupEventListeners();
+                syncPrefs();
             } catch (e) {
                 console.error("Error during setup", e);
             }
@@ -264,17 +331,15 @@ window.onload = function () {
                 term.resize(80, 24); // Fallback
             }
 
-            // 4. Load WebGL (unavailable in this DOM-renderer-only build)
-            if (shouldEnableWebGL) {
-                try {
-                    webglAddon.onContextLoss(e => {
-                        webglAddon.dispose();
-                    });
-                    term.loadAddon(webglAddon);
-                    console.log("WebGL renderer loaded");
-                } catch (e) {
-                    console.warn("WebGL renderer failed to load, falling back to canvas", e);
-                }
+            // 3.1 显式同步一次尺寸：如果初始尺寸恰好没变化，term.onResize 不会
+            //     触发，这里保证 guest 的 tty 尺寸在启动阶段就与 xterm 对齐。
+            if (native && native.resize) {
+                native.resize(term.cols, term.rows);
+            }
+
+            // 4. Load WebGL renderer (addon; falls back to DOM on failure/loss)
+            if (ENABLE_WEBGL && italicsEnabled) {
+                enableWebGLRenderer();
             }
 
             // 5. Initialize and Start Shell
@@ -395,27 +460,23 @@ function setupEventListeners() {
     }, { passive: false });
 
     // --- Touch gesture arbitration + fling (momentum) scrolling ---
-    // Terminal content is not natively scrollable: the visible layers are
-    // fixed and xterm emulates scrolling by writing viewport.scrollTop in its
-    // own touchmove handler on #terminal. When the drag starts on selectable
-    // text (user-select: text, kept for long-press copy), the WebView may
-    // claim the gesture for text selection and cancel the touch stream —
-    // which made swiping over text feel stuck.
+    // xterm.js 6 内部用 scrollable/scrollLines 管理滚动（不是 DOM scrollTop）。
+    // 它的 touchmove 处理器负责普通拖动滚动；当拖动从可选中的文字上开始
+    // （user-select: text 用于长按复制）时，WebView 可能把手势判给文本选择并
+    // 取消 touch 流，导致滑动发涩。
     //
-    // Arbitration:
-    //   - Swipe past the slop threshold → claim the gesture via
-    //     preventDefault() so the browser never turns it into a selection or
-    //     pan gesture; xterm's handler still receives the events and scrolls.
-    //   - Selection appearing mid-gesture (long-press) → hand the stream back
-    //     to the browser so word selection + copy keep working.
-    //   - Multi-touch (pinch zoom) is left untouched.
+    // 仲裁：
+    //   - 滑动超过 slop → preventDefault() 抢下手势，阻止浏览器把它变成选择/平移，
+    //     xterm 自己的处理器仍然能收到事件并滚动。
+    //   - 手势中途出现选择（长按）→ 把流交还浏览器，保留取词 + 复制。
+    //   - 多指（缩放）不处理。
     //
-    // Fling: while a scroll gesture is active, sample touch positions and on
-    // release keep scrolling with an exponentially decaying velocity (rAF).
-    // Buffer/render sync needs no extra work — xterm's 'scroll' listener on
-    // .xterm-viewport fires for every scrollTop change (same path as wheel).
+    // Fling：滚动手势期间采样触点，松手后按指数衰减的速度继续滚动（rAF），
+    // 通过 term.scrollLines() 驱动（xterm.js 5/6 都可用）。
     var touchStartX = 0;
     var touchStartY = 0;
+    var lastTouchY = 0;      // 上一次 touchmove 的 Y，用于拖动滚动
+    var scrollCarryPx = 0;   // 拖动时未满一行的像素余量
     var touchHadSelection = false;
     var gestureDecided = false;
     var isScrollGesture = false;
@@ -436,19 +497,39 @@ function setupEventListeners() {
         }
     }
 
+    // xterm.js 6 用内部 scrollable/scrollLines 管理滚动，viewport.scrollTop 不再
+    // 有效；惯性滚动统一走 term.scrollLines()。
+    function cellHeightPx() {
+        if (!term || term.rows <= 0) return 0;
+        var screen = document.querySelector('#terminal .xterm-screen');
+        if (!screen) return 0;
+        var h = screen.getBoundingClientRect().height;
+        return h > 0 ? h / term.rows : 0;
+    }
+
     function startFling(velocity) {
-        var vp = document.querySelector('#terminal .xterm-viewport');
-        if (!vp) return;
+        if (!term) return;
         stopFling();
-        var v = velocity;
+        var v = velocity;              // px/ms，正值 = 手指上滑 = 向下滚动
+        var carry = 0;                 // 未满一行的像素余量
         var lastTime = performance.now();
         var step = function (now) {
             var dt = now - lastTime;
             lastTime = now;
-            var before = vp.scrollTop;
-            vp.scrollTop = before + v * dt;
-            // Unchanged scrollTop → hit the top/bottom bound (or no scrollback)
-            if (vp.scrollTop === before) {
+            var cellH = cellHeightPx();
+            if (cellH <= 0) {
+                flingRafId = 0;
+                return;
+            }
+            carry += v * dt;
+            var lines = Math.trunc(carry / cellH);
+            var before = term.buffer.active.viewportY;
+            if (lines !== 0) {
+                carry -= lines * cellH;
+                term.scrollLines(lines);
+            }
+            // 滚动位置没变 → 已到顶/底（或没有 scrollback）
+            if (lines !== 0 && term.buffer.active.viewportY === before) {
                 flingRafId = 0;
                 return;
             }
@@ -477,6 +558,8 @@ function setupEventListeners() {
         }
         touchStartX = e.touches[0].clientX;
         touchStartY = e.touches[0].clientY;
+        lastTouchY = touchStartY;
+        scrollCarryPx = 0;
         touchHadSelection = nativeSelectionActive();
         gestureDecided = false;
         isScrollGesture = false;
@@ -501,9 +584,22 @@ function setupEventListeners() {
         }
         if (isScrollGesture) {
             // Claim the gesture before the browser can classify it as a text
-            // selection drag. xterm's bubble-phase touchmove handler on
-            // #terminal still receives this event and does the scrolling.
+            // selection drag.
             e.preventDefault();
+            // xterm.js 6 的 scrollable 不再有可滚动的 DOM，触摸拖动需要自己
+            // 转成 term.scrollLines()（xterm 5 是浏览器原生滚动 viewport）。
+            var cellH = cellHeightPx();
+            if (cellH > 0) {
+                scrollCarryPx += (lastTouchY - y); // 手指上滑 → 正 → 向下滚
+                lastTouchY = y;
+                var lines = Math.trunc(scrollCarryPx / cellH);
+                if (lines !== 0) {
+                    scrollCarryPx -= lines * cellH;
+                    term.scrollLines(lines);
+                }
+            } else {
+                lastTouchY = y;
+            }
             touchSamples.push({ y: y, t: e.timeStamp });
             while (touchSamples.length > 2 && e.timeStamp - touchSamples[0].t > FLING_SAMPLE_MS) {
                 touchSamples.shift();
@@ -598,28 +694,12 @@ exports.write = (data, applicationMode) => {
     }
 };
 
+// 数据从 native 侧以原始字节（base64）送来，直接解码写入即可。
+// 旧实现还会把 "\x1b" 这类字面量转义还原成字节，那是 hterm 时代的遗留；
+// 现已去掉 native 侧的 hex 转义，这里不再做二次解码（省掉每帧一次大正则）。
 exports.writeBase64 = (base64Data, applicationMode) => {
     try {
-        let binaryString = atob(base64Data);
-
-        // 兼容性修复：还原字面量转义序列 (Unescape)
-        // 支持 \xHH, \uHHHH, 以及常见 C 风格转义符 (\n, \r, \t, \', \", \\)
-        binaryString = binaryString.replace(/\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|.)/g, (match, param) => {
-            if (param[0] === 'x' || param[0] === 'u') {
-                return String.fromCharCode(parseInt(param.slice(1), 16));
-            }
-            switch (param) {
-                case 'n': return '\n';
-                case 'r': return '\r';
-                case 't': return '\t';
-                case 'b': return '\b';
-                case 'f': return '\f';
-                case 'v': return '\v';
-                case '0': return '\0';
-                default: return param; // For \' \" \\ and others, just return the char
-            }
-        });
-
+        const binaryString = atob(base64Data);
         const uint8 = new Uint8Array(binaryString.length);
         for (let i = 0; i < binaryString.length; i++) {
             uint8[i] = binaryString.charCodeAt(i);
@@ -689,6 +769,13 @@ exports.setLigatures = (enabled) => {
 
 exports.setItalic = (enabled) => {
     document.body.classList.toggle('italics-off', !enabled);
+    italicsEnabled = !!enabled;
+    // WebGL 渲染器无法用 CSS 关闭斜体，所以关闭斜体时退回 DOM 渲染器
+    if (!italicsEnabled) {
+        disableWebGLRenderer();
+    } else if (ENABLE_WEBGL) {
+        enableWebGLRenderer();
+    }
 };
 
 // --- Terminal appearance: background color / image / gaussian blur ---

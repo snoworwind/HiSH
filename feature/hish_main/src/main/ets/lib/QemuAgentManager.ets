@@ -32,6 +32,18 @@ interface ManagerStatus {
   isConnected: boolean
 }
 
+// xterm 的字符网格尺寸（columns x rows）
+export interface TerminalSize {
+  cols: number
+  rows: number
+}
+
+// 终端尺寸同步的虚拟使用者标识
+const TERMINAL_USER = 'terminal-size'
+// 尺寸下发失败（QGA 未就绪 / 被其它组件占用）时的重试间隔与次数
+const TERMINAL_SIZE_RETRY_MS = 2000
+const TERMINAL_SIZE_MAX_ATTEMPTS = 6
+
 /**
  * QemuAgent 连接管理器（单例）
  * 统一管理 QGA Socket 连接，避免多组件同时访问导致的竞争问题
@@ -44,6 +56,14 @@ class QemuAgentManagerImpl {
   private waitQueue: ConnectionRequest[] = []
   private isProcessing: boolean = false
   private keepAliveTimer: number = -1
+
+  // 待下发的终端尺寸：启动早期 QGA 可能还没就绪，先记住最新值，连上后补发
+  private pendingTerminalSize: TerminalSize | null = null
+  private terminalSizeTimer: number = -1
+  private terminalSizeAttempts: number = 0
+  private terminalSizeFlushing: boolean = false
+  // 是否正在建立连接：避免终端尺寸同步与其它组件并发创建连接、互相 disconnect
+  private connecting: boolean = false
 
   private constructor() { }
 
@@ -165,6 +185,123 @@ class QemuAgentManagerImpl {
   }
 
   /**
+   * 把 xterm 的当前字符网格尺寸同步到 guest 的串口 tty（/dev/ttyAMA0）。
+   *
+   * host 与 guest 之间只有 QEMU 的 socket chardev，没有 pty，guest 拿不到
+   * TIOCSWINSZ。nvim / less / top 等全屏程序通过 TIOCGWINSZ 读取 tty 尺寸，
+   * 尺寸过期的直接后果是换行与绝对光标定位错位（大量“排版错误”）。
+   *
+   * 这里用 QGA 在 guest 内执行 stty：TIOCSWINSZ 会让 guest 内核给该 tty 的
+   * 前台进程组发 SIGWINCH，全屏程序随即按新尺寸重排；不会向输入流写任何字节，
+   * 因此不会像直接注入 CSI 8 t 那样被 shell/zle 当成键盘输入。
+   *
+   * QGA 尚未就绪时会把尺寸记为 pending 并自动重试；返回 false 仅表示本次未下发。
+   */
+  async applyTerminalSize(cols: number, rows: number): Promise<boolean> {
+    const c = Math.floor(cols)
+    const r = Math.floor(rows)
+    if (!(c >= 2 && c <= 1000 && r >= 1 && r <= 1000)) {
+      hilog.warn(DOMAIN, 'AgentManager', '忽略非法终端尺寸: %{public}dx%{public}d', cols, rows)
+      return false
+    }
+
+    const old = this.pendingTerminalSize
+    const changed = old === null || old.cols !== c || old.rows !== r
+    this.pendingTerminalSize = { cols: c, rows: r }
+    if (changed) {
+      // 尺寸变了就重置重试预算，保证新尺寸有机会下发
+      this.terminalSizeAttempts = 0
+    }
+
+    const applied = await this.flushTerminalSize()
+    if (!applied) {
+      this.scheduleTerminalSizeRetry()
+    }
+    return applied
+  }
+
+  /**
+   * 尝试把 pending 尺寸真正写进 guest；返回是否已无待下发尺寸。
+   */
+  private async flushTerminalSize(): Promise<boolean> {
+    const size = this.pendingTerminalSize
+    if (!size) {
+      return true
+    }
+    // 已有下发流程在进行，或其它组件正占用 QGA / 正在建连：稍后重试，不消耗重试预算
+    if (this.terminalSizeFlushing || this.currentUser || this.connecting) {
+      return false
+    }
+
+    this.terminalSizeFlushing = true
+    try {
+      const agent = await this.acquire(TERMINAL_USER, AgentPriority.NORMAL, 1500)
+      if (!agent) {
+        this.terminalSizeAttempts++
+        return false
+      }
+
+      // 等待连接期间 xterm 可能又变了，下发最新值
+      const latest = this.pendingTerminalSize ?? size
+      const cmd = `stty -F /dev/ttyAMA0 rows ${latest.rows} cols ${latest.cols}`
+      try {
+        const pid = await agent.exec('/bin/sh', ['-c', cmd])
+        if (pid === null) {
+          this.terminalSizeAttempts++
+          hilog.warn(DOMAIN, 'AgentManager', '终端尺寸下发失败 (pid=null): %{public}s', cmd)
+          return false
+        }
+        hilog.info(DOMAIN, 'AgentManager', '终端尺寸已同步到 guest: %{public}dx%{public}d', latest.cols, latest.rows)
+        if (this.pendingTerminalSize === latest) {
+          this.pendingTerminalSize = null
+        }
+        this.terminalSizeAttempts = 0
+        return true
+      } finally {
+        await this.release(TERMINAL_USER)
+      }
+    } catch (e) {
+      this.terminalSizeAttempts++
+      hilog.warn(DOMAIN, 'AgentManager', '终端尺寸同步异常: %{public}s', JSON.stringify(e))
+      return false
+    } finally {
+      this.terminalSizeFlushing = false
+    }
+  }
+
+  /**
+   * QGA 还不可用时安排一次重试（指数退避会拖得太久，这里固定间隔 + 次数上限）。
+   */
+  private scheduleTerminalSizeRetry(): void {
+    if (this.terminalSizeTimer !== -1 || !this.pendingTerminalSize) {
+      return
+    }
+    if (this.terminalSizeAttempts >= TERMINAL_SIZE_MAX_ATTEMPTS) {
+      hilog.warn(DOMAIN, 'AgentManager', '终端尺寸同步重试次数用尽，等待下一次 resize 再试')
+      return
+    }
+    this.terminalSizeTimer = setTimeout(() => {
+      this.terminalSizeTimer = -1
+      void this.flushTerminalSize().then((applied: boolean) => {
+        if (!applied) {
+          this.scheduleTerminalSizeRetry()
+        }
+      })
+    }, TERMINAL_SIZE_RETRY_MS)
+  }
+
+  /**
+   * QGA 刚就绪（新建或复用连接）：补发启动早期没能下发的终端尺寸。
+   * 此刻连接被调用方占用，所以只安排一次稍后的重试。
+   */
+  private onAgentReady(): void {
+    if (this.pendingTerminalSize) {
+      this.terminalSizeAttempts = 0
+      this.scheduleTerminalSizeRetry()
+    }
+  }
+
+  /**
    * 强制释放当前连接（用于高优先级抢占或彻底清理）
    */
   private async forceRelease(): Promise<void> {
@@ -193,6 +330,7 @@ class QemuAgentManagerImpl {
     if (this.agent && this.agent.isAlive()) {
       hilog.info(DOMAIN, 'AgentManager', '复用现有空闲连接: %{public}s', userId)
       this.currentUser = userId
+      this.onAgentReady()
       return this.agent
     }
 
@@ -201,6 +339,13 @@ class QemuAgentManagerImpl {
       hilog.error(DOMAIN, 'AgentManager', 'appTempDir 未设置')
       return null
     }
+
+    // 同一时间只允许一个连接在建立：并发 connect 会互相 disconnect，导致双方都失败
+    if (this.connecting) {
+      hilog.info(DOMAIN, 'AgentManager', '已有连接正在建立，%{public}s 稍后重试', userId)
+      return null
+    }
+    this.connecting = true
 
     const qgaSocket = appTempDir + '/qga_socket'
 
@@ -219,6 +364,7 @@ class QemuAgentManagerImpl {
 
         // 启动心跳保活
         this.startKeepAlive()
+        this.onAgentReady()
 
         return this.agent
       } else {
@@ -230,6 +376,8 @@ class QemuAgentManagerImpl {
       this.agent = null
       hilog.error(DOMAIN, 'AgentManager', '创建连接失败: %{public}s', JSON.stringify(e))
       return null
+    } finally {
+      this.connecting = false
     }
   }
 

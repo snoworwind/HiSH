@@ -9,6 +9,7 @@ import { common } from '@kit.AbilityKit';
 import { SymbolGlyphModifier } from '@kit.ArkUI';
 import stringToArrayBuffer from '../lib/stringToArrayBuffer';
 import fileToDataUrl from '../lib/fileToDataUrl';
+import { QemuAgentManager } from '../lib/QemuAgentManager';
 import { ImmersiveButtonModifier, ImmersiveToggleModifier } from '../lib/immersiveButton';
 import {
   applyVirtualKeyModifiers,
@@ -48,6 +49,11 @@ export default struct WebTerminal {
   webviewController: WebviewController = new webview.WebviewController()
   utf8Decoder = util.TextDecoder.create('utf-8', { ignoreBOM: true })
   applicationMode: boolean = false
+  // 终端尺寸同步：xterm fit 后会连续触发多次 resize，先防抖再写入 guest tty
+  private pendingCols: number = 0
+  private pendingRows: number = 0
+  private resizeDebounceTimer: number = -1
+  private readonly RESIZE_DEBOUNCE_MS: number = 200
   immersiveButton: ImmersiveButtonModifier = new ImmersiveButtonModifier()
   immersiveToggle: ImmersiveToggleModifier = new ImmersiveToggleModifier()
 
@@ -412,10 +418,47 @@ export default struct WebTerminal {
   }
 
   async resize(width: number, height: number): Promise<void> {
-    hilog.info(DOMAIN, "WebTerminal", 'on resize: %{public}d, %{public}d', width, height)
-    // 串口终端没有 TIOCSWINSZ 通道，尺寸只影响 WebView 内的 xterm 布局。
-    // 不要向 pty 写 CSI 8 t：它会被 shell 的行编辑器当成键盘输入，
-    // 在 zsh 里表现为命令行出现 ";<rows>;<cols>t" 这样的碎片。
+    const cols = Math.floor(width)
+    const rows = Math.floor(height)
+    if (!(cols >= 2 && rows >= 1)) {
+      return
+    }
+    hilog.info(DOMAIN, "WebTerminal", 'on resize: %{public}d cols, %{public}d rows', cols, rows)
+
+    // host 与 guest 之间只有 QEMU 的 socket chardev，没有 pty，guest 不会自动
+    // 得到 TIOCSWINSZ。xterm 已经按新尺寸重排，但 guest 里的 tty 仍是旧尺寸，
+    // nvim 等全屏程序会按旧网格做绝对定位 → 换行/光标错位。
+    // 因此这里把尺寸通过 QGA 写进 guest 的 /dev/ttyAMA0（内核会发 SIGWINCH）。
+    // 不要向输入流注入 CSI 8 t：那会被 shell 的行编辑器当成键盘输入。
+    this.pendingCols = cols
+    this.pendingRows = rows
+
+    if (this.resizeDebounceTimer !== -1) {
+      clearTimeout(this.resizeDebounceTimer)
+    }
+    this.resizeDebounceTimer = setTimeout(() => {
+      this.resizeDebounceTimer = -1
+      void this.applyTerminalSize()
+    }, this.RESIZE_DEBOUNCE_MS)
+  }
+
+  // 把最近一次 xterm 尺寸写入 guest tty；QGA 未就绪时由 QemuAgentManager 重试。
+  private async applyTerminalSize(): Promise<void> {
+    if (this.pendingCols < 2 || this.pendingRows < 1) {
+      return
+    }
+    try {
+      await QemuAgentManager.applyTerminalSize(this.pendingCols, this.pendingRows)
+    } catch (e) {
+      hilog.error(DOMAIN, 'WebTerminal', 'applyTerminalSize failed: %{public}s', JSON.stringify(e))
+    }
+  }
+
+  aboutToDisappear(): void {
+    if (this.resizeDebounceTimer !== -1) {
+      clearTimeout(this.resizeDebounceTimer)
+      this.resizeDebounceTimer = -1
+    }
   }
 
   // 性能优化：输出缓冲区
@@ -462,17 +505,13 @@ export default struct WebTerminal {
       // 清空缓冲区
       this.pendingChunks = [];
 
-      // 3. 检测清屏信号
-      // 检查合并后的数据是否包含 \x1b[H\x1b[J 的字面量转义序列
-      if (merged.length >= 12 &&
-        merged[0] === 0x5C && merged[1] === 0x78 && merged[2] === 0x31 && merged[3] === 0x62 && // \x1b
-        merged[4] === 0x5B && merged[5] === 0x48 && // [H
-        merged[6] === 0x5C && merged[7] === 0x78 && merged[8] === 0x31 && merged[9] === 0x62 && // \x1b
-        merged[10] === 0x5B && merged[11] === 0x4A // [J
-      ) {
-        const clearCmd = '\\x1b[3J';
-        const encoder = util.TextEncoder.create('utf-8');
-        const clearBytes = encoder.encodeInto(clearCmd);
+      // 3. 检测清屏信号（busybox clear 会输出 ESC[H ESC[J）
+      // 数据现在是原始字节，直接按字节匹配；命中后追加 ESC[3J 一并清掉
+      // xterm 的 scrollback（xterm.js 对 CSI 3J 有专门支持）。
+      if (merged.length >= 6 &&
+        merged[0] === 0x1B && merged[1] === 0x5B && merged[2] === 0x48 && // ESC[H
+        merged[3] === 0x1B && merged[4] === 0x5B && merged[5] === 0x4A) { // ESC[J
+        const clearBytes = new Uint8Array([0x1B, 0x5B, 0x33, 0x4A]); // ESC[3J
         const clearBase64 = new util.Base64Helper().encodeToStringSync(clearBytes);
         this.webviewController.runJavaScript(`exports.writeBase64("${clearBase64}", ${this.applicationMode})`);
       }

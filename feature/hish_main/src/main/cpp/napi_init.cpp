@@ -860,13 +860,17 @@ void send_data_to_callback(const std::string &hex, napi_threadsafe_function call
     napi_call_threadsafe_function(callback, pbuf, napi_tsfn_nonblocking);
 }
 
-void on_serial_data_received(const std::string &hex) {
-    if (hex.length() > 0) {
+// 串口输出按原始字节转发（不再做 hex 字面量转义）：
+// 数据量从约 5.3x（hex 4x + base64 1.33x）降到 1.33x，也省掉 WebView 侧
+// 每帧一次的正则还原。注意 std::string 可以安全保存 NUL 字节。
+void on_serial_data_received(const uint8_t *data, size_t len) {
+    if (data != nullptr && len > 0) {
         std::lock_guard<std::mutex> lk(buffer_mtx);
         if (on_data_callback != nullptr) {
-            send_data_to_callback(hex, on_data_callback);
+            std::string raw(reinterpret_cast<const char *>(data), len);
+            send_data_to_callback(raw, on_data_callback);
         } else {
-            temp_buffer.append(hex);
+            temp_buffer.append(reinterpret_cast<const char *>(data), len);
         }
     }
 }
@@ -929,11 +933,8 @@ void serial_output_worker(const char *unix_socket_path) {
             int fd = fds[i].fd;
             ssize_t r = read(fd, buffer, sizeof(buffer) - 1);
             if (r > 0) {
-                // pretty print
-                auto hex = convert_to_hex(buffer, r);
-                //  call callback registered by ArkTS
-                on_serial_data_received(hex);
-                OH_LOG_INFO(LOG_APP, "Received, data: %{public}s", hex.c_str());
+                // 直接转发原始字节；这里不做 hex 格式化，也不逐块打日志
+                on_serial_data_received(buffer, static_cast<size_t>(r));
             } else if (r < 0) {
                 OH_LOG_INFO(LOG_APP, "Program exited, %{public}ld %{public}d", r, errno);
                 broken = true;
